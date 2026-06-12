@@ -1273,7 +1273,246 @@ function advancePO(stage,w,l){
       }
     },800);
   }
+}<!-- Toss Modal HTML (paste near other modals) -->
+<div id="tossModal" style="display:none; position:fixed; left:50%; top:30%; transform:translate(-50%,-30%); background:#fff; padding:16px; border:1px solid #ccc; z-index:9999;">
+  <div id="tossText"></div>
+  <div style="margin-top:8px;">
+    <button id="tossCallBtn">Flip Toss</button>
+    <button id="tossCloseBtn">Close</button>
+  </div>
+</div>
+// Toss logic
+function computeTossProbability(homeAdvantage = 0.05, formDiff = 0) {
+  let pHome = 0.5 + homeAdvantage + 0.02 * formDiff;
+  pHome = Math.max(0.05, Math.min(0.95, pHome));
+  return pHome;
 }
+
+function performToss(homeTeam, awayTeam) {
+  const pHome = computeTossProbability(homeTeam.homeAdvantage || 0.05, (homeTeam.form || 0) - (awayTeam.form || 0));
+  const r = Math.random();
+  const winner = r < pHome ? homeTeam : awayTeam;
+  return { winner, pHome };
+}
+
+// UI hooks
+function showTossModal(homeTeam, awayTeam) {
+  const modal = document.getElementById('tossModal');
+  const pHome = computeTossProbability(homeTeam.homeAdvantage || 0.05, (homeTeam.form || 0) - (awayTeam.form || 0));
+  document.getElementById('tossText').innerText = `${homeTeam.name} toss win probability: ${(pHome*100).toFixed(1)}%`;
+  modal.style.display = 'block';
+  document.getElementById('tossCallBtn').onclick = () => {
+    const res = performToss(homeTeam, awayTeam);
+    document.getElementById('tossText').innerText = `Toss winner: ${res.winner.name} (probability shown earlier)`;
+    // call your existing logic to let winner choose bat/bowl
+    modal.style.display = 'none';
+    // e.g., startMatchWithTossWinner(res.winner);
+  };
+  document.getElementById('tossCloseBtn').onclick = () => { modal.style.display = 'none'; };
+}
+// Pitch profiles
+const pitchProfiles = {
+  flat: { bounce: 0.5, pace: 0.4, spinAssist: -0.2, deterioration: 0.02, dewSusceptibility: 0.2 },
+  green: { bounce: 0.7, pace: 0.6, spinAssist: -0.4, deterioration: 0.03, dewSusceptibility: 0.1 },
+  turning: { bounce: 0.4, pace: 0.3, spinAssist: 0.6, deterioration: 0.04, dewSusceptibility: 0.3 }
+};
+
+// Sample final pitch from home preference with jitter so it's not guaranteed
+function sampleFinalPitch(preference, ground) {
+  const base = pitchProfiles[preference] || pitchProfiles.flat;
+  const jitter = () => (Math.random() - 0.5) * 0.2;
+  const finalPitch = {
+    bounce: clamp(base.bounce + jitter(), 0, 1),
+    pace: clamp(base.pace + jitter(), 0, 1),
+    spinAssist: clamp(base.spinAssist + jitter(), -1, 1),
+    deterioration: Math.max(0, base.deterioration + jitter() * 0.02),
+    dewSusceptibility: ground.dewProne ? base.dewSusceptibility + 0.1 * Math.random() : base.dewSusceptibility
+  };
+  return finalPitch;
+}
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+// Roller effect applied before match start
+function applyRoller(finalPitch, rollerChoice) {
+  const p = Object.assign({}, finalPitch);
+  if (rollerChoice === 'heavy') {
+    p.spinAssist = clamp(p.spinAssist - 0.25 * Math.random(), -1, 1);
+    p.pace = clamp(p.pace + 0.05 * Math.random(), 0, 1);
+    p.bounce = clamp(p.bounce - 0.05 * Math.random(), 0, 1);
+  } else if (rollerChoice === 'light') {
+    p.spinAssist = clamp(p.spinAssist + 0.05 * Math.random(), -1, 1);
+  }
+  return p;
+}
+
+// Dew activation check during match (call at start of second innings or periodically)
+function checkDew(ground, matchTime) {
+  const hour = matchTime.getHours();
+  const nightFactor = (hour >= 18 || hour <= 6) ? 0.3 : 0;
+  const dewChance = ground.dewProne ? 0.2 + nightFactor : 0.05 + nightFactor;
+  return Math.random() < dewChance;
+}
+
+<!-- Squad Spinner Modal -->
+<div id="squadModal" style="display:none; position:fixed; left:50%; top:10%; transform:translate(-50%,0); background:#fff; padding:12px; border:1px solid #ccc; z-index:9999; width:600px;">
+  <h3>Select Squad</h3>
+  <div id="squadSlots" style="display:flex; flex-wrap:wrap; gap:8px; max-height:300px; overflow:auto;"></div>
+  <div style="margin-top:8px;">
+    <button id="spinSquadBtn">Spin Squad</button>
+    <button id="confirmSquadBtn">Confirm Squad</button>
+    <button id="closeSquadBtn">Close</button>
+  </div>
+  <div id="squadErrors" style="color:red; margin-top:8px;"></div>
+</div>
+
+<!-- Playing XI selection area -->
+<div id="xiModal" style="display:none; position:fixed; left:50%; top:10%; transform:translate(-50%,0); background:#fff; padding:12px; border:1px solid #ccc; z-index:9999; width:600px;">
+  <h3>Pick Playing 11</h3>
+  <div id="squadList" style="display:flex; flex-direction:column; gap:6px; max-height:300px; overflow:auto;"></div>
+  <div style="margin-top:8px;">
+    <button id="autoPickXI">Auto Pick XI</button>
+    <button id="confirmXI">Confirm XI</button>
+    <button id="closeXIBtn">Close</button>
+  </div>
+  <div id="xiErrors" style="color:red; margin-top:8px;"></div>
+</div>
+// Example pool: array of player objects {id,name,role,isOverseas,isKeeper}
+// Provide your own team pool
+let teamPool = []; // fill with all available players for the team
+
+function openSquadModal(pool) {
+  teamPool = pool.slice();
+  const modal = document.getElementById('squadModal');
+  const slots = document.getElementById('squadSlots');
+  slots.innerHTML = '';
+  for (let i = 0; i < 15; i++) {
+    const div = document.createElement('div');
+    div.style.border = '1px solid #ddd';
+    div.style.padding = '6px';
+    div.style.width = '120px';
+    div.style.height = '40px';
+    div.style.display = 'flex';
+    div.style.alignItems = 'center';
+    div.style.justifyContent = 'center';
+    div.innerText = `Slot ${i+1}`;
+    slots.appendChild(div);
+  }
+  modal.style.display = 'block';
+  document.getElementById('spinSquadBtn').onclick = () => spinSquad(pool);
+  document.getElementById('confirmSquadBtn').onclick = () => confirmSquad();
+  document.getElementById('closeSquadBtn').onclick = () => { modal.style.display = 'none'; };
+}
+
+let currentSquad = [];
+
+function spinSquad(pool) {
+  // Randomly pick 15 unique players
+  const copy = pool.slice();
+  shuffleArray(copy);
+  currentSquad = copy.slice(0, 15);
+  const slots = document.getElementById('squadSlots');
+  slots.innerHTML = '';
+  currentSquad.forEach(p => {
+    const div = document.createElement('div');
+    div.style.border = '1px solid #ddd';
+    div.style.padding = '6px';
+    div.style.width = '120px';
+    div.style.height = '40px';
+    div.style.display = 'flex';
+    div.style.alignItems = 'center';
+    div.style.justifyContent = 'center';
+    div.innerText = `${p.name} ${p.isOverseas ? '🌍' : ''} ${p.role === 'WK' ? '🧤' : ''}`;
+    slots.appendChild(div);
+  });
+}
+
+function confirmSquad() {
+  if (currentSquad.length !== 15) {
+    document.getElementById('squadErrors').innerText = 'Spin to generate 15 players first.';
+    return;
+  }
+  document.getElementById('squadModal').style.display = 'none';
+  openXIModal(currentSquad);
+}
+
+function openXIModal(squad) {
+  const modal = document.getElementById('xiModal');
+  const list = document.getElementById('squadList');
+  list.innerHTML = '';
+  squad.forEach(p => {
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.justifyContent = 'space-between';
+    row.style.alignItems = 'center';
+    row.style.border = '1px solid #eee';
+    row.style.padding = '6px';
+    const left = document.createElement('div');
+    left.innerText = `${p.name} ${p.role} ${p.isOverseas ? '🌍' : ''}`;
+    const right = document.createElement('div');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.playerId = p.id;
+    right.appendChild(checkbox);
+    row.appendChild(left);
+    row.appendChild(right);
+    list.appendChild(row);
+  });
+  modal.style.display = 'block';
+  document.getElementById('autoPickXI').onclick = () => autoPickXI(squad);
+  document.getElementById('confirmXI').onclick = () => confirmXI();
+  document.getElementById('closeXIBtn').onclick = () => { modal.style.display = 'none'; };
+}
+
+function autoPickXI(squad) {
+  // Simple auto pick: ensure 1 WK, max 4 overseas, at least 4 bowlers
+  const wk = squad.find(p => p.role === 'WK') || squad[0];
+  const bowlers = squad.filter(p => p.role === 'BOW').slice(0,5);
+  const allrounders = squad.filter(p => p.role === 'ALL').slice(0,3);
+  const bats = squad.filter(p => p.role === 'BAT').slice(0,3);
+  let xi = [wk].concat(bats, allrounders, bowlers).slice(0,11);
+  // enforce overseas max 4
+  const overseasCount = xi.filter(p => p.isOverseas).length;
+  if (overseasCount > 4) {
+    // replace extra overseas with local players from squad
+    const locals = squad.filter(p => !p.isOverseas && !xi.includes(p));
+    for (let i = xi.length-1; i >=0 && xi.filter(p=>p.isOverseas).length>4; i--) {
+      if (xi[i].isOverseas && locals.length) xi[i] = locals.shift();
+    }
+  }
+  // mark checkboxes
+  const checkboxes = document.querySelectorAll('#squadList input[type=checkbox]');
+  checkboxes.forEach(cb => cb.checked = xi.some(p => p.id == cb.dataset.playerId));
+}
+
+function confirmXI() {
+  const checkboxes = document.querySelectorAll('#squadList input[type=checkbox]');
+  const selected = [];
+  checkboxes.forEach(cb => {
+    if (cb.checked) {
+      const pid = cb.dataset.playerId;
+      const p = currentSquad.find(x => x.id == pid);
+      if (p) selected.push(p);
+    }
+  });
+  if (selected.length !== 11) {
+    document.getElementById('xiErrors').innerText = 'Select exactly 11 players.';
+    return;
+  }
+  // Validate constraints: 1 WK, max 4 overseas, min 4 bowlers
+  const wkCount = selected.filter(p => p.role === 'WK').length;
+  const overseasCount = selected.filter(p => p.isOverseas).length;
+  const bowlCount = selected.filter(p => p.role === 'BOW' || p.role === 'ALL').length;
+  if (wkCount < 1) { document.getElementById('xiErrors').innerText = 'Select at least 1 wicketkeeper.'; return; }
+  if (overseasCount > 4) { document.getElementById('xiErrors').innerText = 'Max 4 overseas players allowed.'; return; }
+  if (bowlCount < 4) { document.getElementById('xiErrors').innerText = 'Select at least 4 bowlers/allrounders.'; return; }
+
+  // Save playing XI to match state
+  matchState.playingXI = selected;
+  document.getElementById('xiModal').style.display = 'none';
+  // proceed to start match
+}
+function shuffleArray(a) { for (let i = a.length-1; i>0; i--) { const j = Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } }
 
 // ══════════════════════════════════════════════════════════
 // END RESULT
@@ -1309,6 +1548,75 @@ function showEndResult(champ,msg){
 // ══════════════════════════════════════════════════════════
 // SIMULATION ENGINE  — player-stat-driven, dynamic form
 // ══════════════════════════════════════════════════════════
+// --- Ball outcome sampler covering all realistic outcomes ---
+function sampleBallOutcome(bowler, batsman, pitchState, matchState) {
+  // Base probabilities (tune these by simulation)
+  const base = {
+    dot: 0.30,
+    one: 0.28,
+    two: 0.08,
+    three: 0.01,
+    four: 0.12,
+    six: 0.05,
+    wicket: 0.08,
+    wide: 0.03,
+    noball: 0.02,
+    bye: 0.02,
+    legbye: 0.01
+  };
+
+  // Skill modifiers (scale roughly -0.08..+0.08)
+  const bowAcc = (bowler.accuracy || 50) - 50; // -50..+50
+  const batAgg = (batsman.aggression || 50) - 50;
+  const bowSkillFactor = (bowAcc / 500); // -0.1..+0.1
+  const batSkillFactor = (batAgg / 500);
+  const pitchSpin = pitchState.spinAssist || 0; // -1..+1
+  const overPressure = Math.min(0.05 * Math.floor((matchState.over || 0) / 5), 0.1);
+
+  // Adjust probabilities
+  base.dot += 0.06 * bowSkillFactor - 0.04 * batSkillFactor + 0.02 * pitchSpin + overPressure;
+  base.wicket += 0.06 * (0.05 - bowSkillFactor) + 0.04 * (0.05 - batSkillFactor) + 0.02 * pitchSpin;
+  base.four += 0.04 * batSkillFactor - 0.02 * bowSkillFactor;
+  base.six += 0.02 * batSkillFactor;
+
+  // Dew reduces spin effectiveness in second innings
+  if ((matchState.innings === 2) && pitchState.dewActive) {
+    base.wicket = Math.max(0, base.wicket - 0.02);
+    base.dot = Math.max(0, base.dot - 0.03);
+    base.four += 0.02;
+  }
+
+  // Ensure no negative probabilities
+  Object.keys(base).forEach(k => { if (base[k] < 0) base[k] = 0; });
+
+  // Normalize and sample
+  const keys = Object.keys(base);
+  const total = keys.reduce((s, k) => s + base[k], 0);
+  let r = Math.random() * total;
+  for (let k of keys) {
+    r -= base[k];
+    if (r <= 0) return { outcome: k };
+  }
+  return { outcome: 'dot' };
+}
+
+// --- Call this from your delivery loop ---
+// Example usage inside your ball loop:
+// const result = sampleBallOutcome(currentBowler, currentBatsman, pitchState, matchState);
+// handleBallResult(result);
+
+// --- Economy calculation fix ---
+// Track bowler.legalBalls and bowler.runsConceded in your delivery handling.
+// Call updateBowlerStats(bowler) after each delivery update.
+function updateBowlerStats(bowler) {
+  const legalBalls = bowler.legalBalls || 0;
+  const overs = Math.floor(legalBalls / 6) + (legalBalls % 6) / 10;
+  bowler.overs = overs;
+  // economy uses overs in decimal overs = legalBalls/6
+  bowler.economy = legalBalls === 0 ? 0 : (bowler.runsConceded / (legalBalls / 6));
+  bowler.economyDisplay = bowler.economy.toFixed(2);
+}
+
 function batStr(t){const b=t.filter(p=>p.ba>5);return b.length?b.reduce((s,p)=>s+p.ba*(p.sr/140),0)/b.length:28;}
 function bowlStr(t){const b=t.filter(p=>p.ec>0);return b.length?b.reduce((s,p)=>s+p.ec,0)/b.length:9.2;}
 function wc(items,wts){let t=wts.reduce((a,b)=>a+b,0),r=Math.random()*t;for(let i=0;i<items.length;i++){r-=wts[i];if(r<=0)return items[i];}return items[items.length-1];}
